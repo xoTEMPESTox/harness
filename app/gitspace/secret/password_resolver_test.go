@@ -17,10 +17,12 @@ package secret
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/harness/gitness/app/gitspace/secret/enum"
 	gitnesssecret "github.com/harness/gitness/secret"
+	"github.com/harness/gitness/store"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -66,7 +68,7 @@ func TestPasswordResolver_Resolve_SecretNotFound(t *testing.T) {
 	ctx := context.Background()
 	mockSvc := &mockSecretService{
 		decryptFn: func(_ context.Context, _, _ string) (string, error) {
-			return "", errors.New("secret not found in store")
+			return "", fmt.Errorf("failed to find secret: %w", store.ErrResourceNotFound)
 		},
 	}
 
@@ -74,11 +76,31 @@ func TestPasswordResolver_Resolve_SecretNotFound(t *testing.T) {
 	_, err := resolver.Resolve(ctx, ResolutionContext{
 		UserIdentifier:     "user1",
 		GitspaceIdentifier: "gs-1",
-		SecretRef:          "nonexistent-secret",
+		SecretRef:          "harness_password",
+		SpaceIdentifier:    "space1",
+	})
+	require.ErrorIs(t, err, store.ErrResourceNotFound)
+	assert.Contains(t, err.Error(), "SSH key")
+}
+
+func TestPasswordResolver_Resolve_LookupError(t *testing.T) {
+	ctx := context.Background()
+	mockSvc := &mockSecretService{
+		decryptFn: func(_ context.Context, _, _ string) (string, error) {
+			return "", errors.New("failed to decrypt secret")
+		},
+	}
+
+	resolver := NewPasswordResolver(mockSvc)
+	_, err := resolver.Resolve(ctx, ResolutionContext{
+		UserIdentifier:     "user1",
+		GitspaceIdentifier: "gs-1",
+		SecretRef:          "harness_password",
 		SpaceIdentifier:    "space1",
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to resolve secret")
+	assert.NotErrorIs(t, err, store.ErrResourceNotFound)
+	assert.Contains(t, err.Error(), "failed to decrypt secret")
 }
 
 func TestPasswordResolver_Resolve_DefaultPasswordRef_ExistsInStore(t *testing.T) {
@@ -104,52 +126,22 @@ func TestPasswordResolver_Resolve_DefaultPasswordRef_ExistsInStore(t *testing.T)
 	assert.NotEqual(t, "Harness@123", resolved.SecretValue)
 }
 
-func TestPasswordResolver_Resolve_DefaultPasswordRef_GeneratesRandom(t *testing.T) {
+func TestPasswordResolver_Resolve_EmptySecretValue(t *testing.T) {
 	ctx := context.Background()
 	mockSvc := &mockSecretService{
 		decryptFn: func(_ context.Context, _, _ string) (string, error) {
-			return "", errors.New("not found in store")
+			return "", nil
 		},
 	}
 
 	resolver := NewPasswordResolver(mockSvc)
-	resolved1, err := resolver.Resolve(ctx, ResolutionContext{
+	_, err := resolver.Resolve(ctx, ResolutionContext{
 		UserIdentifier:     "user1",
 		GitspaceIdentifier: "gs-1",
 		SecretRef:          "harness_password",
 		SpaceIdentifier:    "space1",
 	})
-	require.NoError(t, err)
-	assert.NotEmpty(t, resolved1.SecretValue)
-	assert.NotEqual(t, "Harness@123", resolved1.SecretValue)
-
-	resolved2, err := resolver.Resolve(ctx, ResolutionContext{
-		UserIdentifier:     "user2",
-		GitspaceIdentifier: "gs-2",
-		SecretRef:          "harness_password",
-		SpaceIdentifier:    "space1",
-	})
-	require.NoError(t, err)
-	assert.NotEmpty(t, resolved2.SecretValue)
-	assert.NotEqual(t, "Harness@123", resolved2.SecretValue)
-
-	// Ensure random passwords differ between instances
-	assert.NotEqual(t, resolved1.SecretValue, resolved2.SecretValue)
-}
-
-func TestPasswordResolver_Resolve_EmptySecretRef_GeneratesRandom(t *testing.T) {
-	ctx := context.Background()
-	resolver := NewPasswordResolver(nil)
-	resolved, err := resolver.Resolve(ctx, ResolutionContext{
-		UserIdentifier:     "user1",
-		GitspaceIdentifier: "gs-1",
-		SecretRef:          "",
-		SpaceIdentifier:    "space1",
-	})
-	require.NoError(t, err)
-	assert.NotEmpty(t, resolved.SecretValue)
-	assert.NotEqual(t, "Harness@123", resolved.SecretValue)
-	assert.Len(t, resolved.SecretValue, 24)
+	require.Error(t, err)
 }
 
 func TestPasswordResolver_Type(t *testing.T) {

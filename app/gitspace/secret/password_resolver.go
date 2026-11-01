@@ -16,15 +16,13 @@ package secret
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/harness/gitness/app/gitspace/secret/enum"
 	"github.com/harness/gitness/secret"
-
-	"github.com/dchest/uniuri"
+	"github.com/harness/gitness/store"
 )
-
-const defaultPasswordRef = "harness_password"
 
 type PasswordResolver struct {
 	secretService secret.Service
@@ -38,40 +36,31 @@ func NewPasswordResolver(secretService secret.Service) *PasswordResolver {
 
 // Resolve implements Resolver.
 func (p *PasswordResolver) Resolve(ctx context.Context, resolutionContext ResolutionContext) (ResolvedSecret, error) {
-	if resolutionContext.SecretRef != "" && resolutionContext.SecretRef != defaultPasswordRef {
-		if p.secretService == nil {
-			return ResolvedSecret{}, fmt.Errorf(
-				"secret service unavailable to resolve secret %q",
-				resolutionContext.SecretRef,
-			)
-		}
-		val, err := p.secretService.DecryptSecret(ctx, resolutionContext.SpaceIdentifier, resolutionContext.SecretRef)
-		if err != nil {
-			return ResolvedSecret{}, fmt.Errorf(
-				"failed to resolve secret %q for gitspace %q: %w",
-				resolutionContext.SecretRef,
-				resolutionContext.GitspaceIdentifier,
-				err,
-			)
-		}
-		return ResolvedSecret{
-			SecretValue: val,
-		}, nil
+	val, err := p.secretService.DecryptSecret(ctx, resolutionContext.SpaceIdentifier, resolutionContext.SecretRef)
+	if errors.Is(err, store.ErrResourceNotFound) {
+		return ResolvedSecret{}, fmt.Errorf(
+			"gitspace %q has no SSH key and secret %q does not exist in space %q, configure one of them: %w",
+			resolutionContext.GitspaceIdentifier,
+			resolutionContext.SecretRef,
+			resolutionContext.SpaceIdentifier,
+			err,
+		)
 	}
-
-	// If the default password ref is provided and exists in the secret store, use it.
-	if resolutionContext.SecretRef == defaultPasswordRef && p.secretService != nil {
-		val, err := p.secretService.DecryptSecret(ctx, resolutionContext.SpaceIdentifier, resolutionContext.SecretRef)
-		if err == nil && val != "" {
-			return ResolvedSecret{
-				SecretValue: val,
-			}, nil
-		}
+	if err != nil {
+		return ResolvedSecret{}, fmt.Errorf(
+			"failed to resolve secret %q for gitspace %q: %w",
+			resolutionContext.SecretRef,
+			resolutionContext.GitspaceIdentifier,
+			err,
+		)
 	}
-
-	// Generate a secure random password per gitspace instance when no specific secret is configured.
+	// An empty password combined with PermitEmptyPasswords in the gitspace sshd config would allow open login.
+	if val == "" {
+		return ResolvedSecret{}, fmt.Errorf("secret %q for gitspace %q is empty",
+			resolutionContext.SecretRef, resolutionContext.GitspaceIdentifier)
+	}
 	return ResolvedSecret{
-		SecretValue: uniuri.NewLen(24),
+		SecretValue: val,
 	}, nil
 }
 
