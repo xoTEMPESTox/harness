@@ -547,6 +547,7 @@ export interface StringsMap {
   'labels.updateLabel': string
   'labels.updated': string
   language: string
+  languages: string
   lastCommit: string
   lastCommitDate: string
   lastTriggeredAt: string
@@ -555,6 +556,7 @@ export interface StringsMap {
   lfsInfo: string
   license: string
   lineBreaks: string
+  linesOfCode: string
   loading: string
   logOut: string
   logoutMsg: string
@@ -639,6 +641,7 @@ export interface StringsMap {
   open: string
   optional: string
   optionalExtendedDescription: string
+  other: string
   overview: string
   owner: string
   owners: string
@@ -1042,6 +1045,7 @@ export interface StringsMap {
   'repos.specificRepositories': string
   repositories: string
   repositoryName: string
+  repositorySize: string
   reqChanges: string
   requestChanges: string
   requestHeaders: string
@@ -1298,6 +1302,7 @@ export interface StringsMap {
   webhookEventsLabel: string
   webhookListingContent: string
   webhookPRBranchUpdated: string
+  webhookPRCheckCompleted: string
   webhookPRClosed: string
   webhookPRCommentCreated: string
   webhookPRCommentStatusUpdated: string
@@ -1307,6 +1312,8 @@ export interface StringsMap {
   webhookPRMerged: string
   webhookPRReopened: string
   webhookPRReviewSubmitted: string
+  webhookPRReviewerAssigned: string
+  webhookPRReviewerUnassigned: string
   webhookPRUpdated: string
   webhookPage: string
   webhookSelectAllEvents: string

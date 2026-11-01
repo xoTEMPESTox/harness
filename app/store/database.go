@@ -18,6 +18,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"iter"
 	"time"
 
 	"github.com/harness/gitness/git/sha"
@@ -281,6 +282,9 @@ type (
 		// UpdateSize updates the size of a specific repository in the database (size is in KiB).
 		UpdateSize(ctx context.Context, id int64, sizeInKiB, sizeLFSInKiB int64) error
 
+		// UpdateLastGITPush moves the last git push time forward. A missing repo is ignored.
+		UpdateLastGITPush(ctx context.Context, repoID int64, pushedAt int64) error
+
 		// GetSize returns the repo size.
 		GetSize(ctx context.Context, id int64) (int64, error)
 
@@ -321,6 +325,11 @@ type (
 
 		// ListSizeInfos returns a list of all active repo sizes.
 		ListSizeInfos(ctx context.Context) ([]*types.RepositorySizeInfo, error)
+
+		// ListAllSizeInfosIter iterates size info for every non-deleted repository, unlike
+		// ListSizeInfos which only covers repos pushed to since their size was last updated.
+		// Iterated rather than returned whole because it covers the entire installation.
+		ListAllSizeInfosIter(ctx context.Context) (iter.Seq2[*types.RepositorySizeInfo, error], error)
 
 		// UpdateNumForks increases or decreases number of forks of the repository.
 		UpdateNumForks(ctx context.Context, repoID int64, delta int64) error
@@ -368,6 +377,9 @@ type (
 			accountID, provider, providerID string,
 			pagination types.Pagination,
 		) ([]types.LinkedRepo, error)
+		// ExistsByRootSpace reports whether a root space owns any live linked repo,
+		// so inbound-webhook consumers can skip root spaces that use no linked repos.
+		ExistsByRootSpace(ctx context.Context, rootSpaceIdentifier string) (bool, error)
 	}
 
 	// LinkedPullReqStore defines persistence operations for the linked-PR mirror table.
@@ -485,6 +497,10 @@ type (
 		// Find the pull request by id.
 		Find(ctx context.Context, id int64) (*types.PullReq, error)
 
+		// FindWithLock finds the pull request by id and acquires an exclusive lock
+		// of the pull request database row for the duration of the transaction.
+		FindWithLock(ctx context.Context, id int64) (*types.PullReq, error)
+
 		// FindByNumberWithLock finds the pull request by repo ID and the pull request number
 		// and acquires an exclusive lock of the pull request database row for the duration of the transaction.
 		FindByNumberWithLock(ctx context.Context, repoID, number int64) (*types.PullReq, error)
@@ -541,6 +557,9 @@ type (
 		// UpdateRootSpace sets the root space id and identifier for all pull requests
 		// whose target repository is any of the given repos.
 		UpdateRootSpace(ctx context.Context, targetRepoIDs []int64, rootSpaceID int64, rootSpaceIdentifier string) error
+
+		// ListRecentAuthorIDs returns distinct user IDs in newest-first order from a bounded pull request scan.
+		ListRecentAuthorIDs(ctx context.Context, repoID int64, limit int) ([]int64, error)
 	}
 
 	PullReqActivityStore interface {
@@ -623,6 +642,9 @@ type (
 
 		// List returns all pull request reviewers for the pull request.
 		List(ctx context.Context, prID int64) ([]*types.PullReqReviewer, error)
+
+		// Count returns the total number of pull request reviewers for the pull request.
+		Count(ctx context.Context, prID int64) (int64, error)
 	}
 
 	PullReqReviewerSuggestionStore interface {
@@ -652,6 +674,9 @@ type (
 			prID,
 			userGroupReviewerID int64,
 		) (*types.UserGroupReviewer, error)
+
+		// Count returns the total number of usergroup reviewers for the pull request.
+		Count(ctx context.Context, prID int64) (int64, error)
 	}
 
 	// PullReqFileViewStore stores information about what file a user viewed.
@@ -875,10 +900,12 @@ type (
 		ListResults(ctx context.Context, repoID int64, commitSHA string) ([]types.CheckResult, error)
 
 		// ResultSummary returns a list of status check result summaries for the provided list of commits in a repo.
+		// Checks with a payload kind in excludePayloadKinds are not counted.
 		ResultSummary(
 			ctx context.Context,
 			repoID int64,
 			commitSHAs []string,
+			excludePayloadKinds []enum.CheckPayloadKind,
 		) (map[sha.SHA]types.CheckCountSummary, error)
 	}
 

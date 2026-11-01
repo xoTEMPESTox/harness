@@ -263,6 +263,9 @@ export type EnumWebhookTrigger =
   | 'pullreq_merged'
   | 'pullreq_reopened'
   | 'pullreq_review_submitted'
+  | 'pullreq_reviewer_assigned'
+  | 'pullreq_reviewer_unassigned'
+  | 'pullreq_check_completed'
   | 'pullreq_target_branch_changed'
   | 'pullreq_updated'
   | 'tag_created'
@@ -1214,6 +1217,11 @@ export interface TypesCommit {
   title?: string
 }
 
+export interface TypesCommitCheckSummary {
+  check_summary?: TypesCheckCountSummary
+  commit_sha?: ShaSHA
+}
+
 export interface TypesCommitDivergence {
   ahead?: number
   behind?: number
@@ -1837,7 +1845,9 @@ export interface TypesRepositoryPullReqSummary {
 export interface TypesRepositorySummary {
   branch_count?: number
   default_branch_commit_count?: number
+  loc?: number
   pull_req_summary?: TypesRepositoryPullReqSummary
+  size?: number
   tag_count?: number
 }
 
@@ -3555,6 +3565,73 @@ export const useListStatusCheckRecent = ({ repo_ref, ...props }: UseListStatusCh
     (paramsInPath: ListStatusCheckRecentPathParams) => `/repos/${paramsInPath.repo_ref}/checks/recent`,
     { base: getConfig('code/api/v1'), pathParams: { repo_ref }, ...props }
   )
+
+export interface ListStatusCheckSummariesPathParams {
+  repo_ref: string
+}
+
+export interface ListStatusCheckSummariesRequestBody {
+  /**
+   * Full commit SHAs. At most 100 are allowed.
+   */
+  commit_shas?: string[] | null
+  /**
+   * Check payload kinds not to count. At most 10.
+   */
+  exclude_payload_kinds?: string[] | null
+}
+
+export type ListStatusCheckSummariesProps = Omit<
+  MutateProps<
+    TypesCommitCheckSummary[],
+    UsererrorError,
+    void,
+    ListStatusCheckSummariesRequestBody,
+    ListStatusCheckSummariesPathParams
+  >,
+  'path' | 'verb'
+> &
+  ListStatusCheckSummariesPathParams
+
+export const ListStatusCheckSummaries = ({ repo_ref, ...props }: ListStatusCheckSummariesProps) => (
+  <Mutate<
+    TypesCommitCheckSummary[],
+    UsererrorError,
+    void,
+    ListStatusCheckSummariesRequestBody,
+    ListStatusCheckSummariesPathParams
+  >
+    verb="POST"
+    path={`/repos/${repo_ref}/checks/summary`}
+    base={getConfig('code/api/v1')}
+    {...props}
+  />
+)
+
+export type UseListStatusCheckSummariesProps = Omit<
+  UseMutateProps<
+    TypesCommitCheckSummary[],
+    UsererrorError,
+    void,
+    ListStatusCheckSummariesRequestBody,
+    ListStatusCheckSummariesPathParams
+  >,
+  'path' | 'verb'
+> &
+  ListStatusCheckSummariesPathParams
+
+export const useListStatusCheckSummaries = ({ repo_ref, ...props }: UseListStatusCheckSummariesProps) =>
+  useMutate<
+    TypesCommitCheckSummary[],
+    UsererrorError,
+    void,
+    ListStatusCheckSummariesRequestBody,
+    ListStatusCheckSummariesPathParams
+  >('POST', (paramsInPath: ListStatusCheckSummariesPathParams) => `/repos/${paramsInPath.repo_ref}/checks/summary`, {
+    base: getConfig('code/api/v1'),
+    pathParams: { repo_ref },
+    ...props
+  })
 
 export interface CodeOwnersValidateQueryParams {
   /**

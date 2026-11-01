@@ -152,13 +152,15 @@ func (s *Service) CommitFiles(ctx context.Context, params *CommitFilesParams) (C
 		refOldSHA = commit.SHA
 	}
 
-	refUpdater, err := hook.CreateRefUpdater(s.hookClientFactory, params.EnvVars, repoPath)
+	refUpdater, err := hook.CreateRefUpdater(repoPath, hook.WithHooks(s.hookClientFactory, params.EnvVars))
 	if err != nil {
 		return CommitFilesResponse{}, fmt.Errorf("failed to create ref updater: %w", err)
 	}
 
+	sharedRunner := s.sharedRunnerFactory.Runner(params.RepoUID, repoPath)
+
 	// run the actions in a shared repo
-	err = sharedrepo.Run(ctx, refUpdater, s.sharedRepoRoot, repoPath, func(r *sharedrepo.SharedRepo) error {
+	err = sharedRunner.Run(ctx, refUpdater, func(r *sharedrepo.SharedRepo) error {
 		var parentCommits []sha.SHA
 		var oldTreeSHA sha.SHA
 

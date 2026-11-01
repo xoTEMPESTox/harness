@@ -16,6 +16,7 @@ package store
 
 import (
 	"context"
+	"iter"
 
 	"github.com/harness/gitness/types"
 
@@ -71,6 +72,10 @@ func (m *RepoStore) Update(_ context.Context, repo *types.Repository) error {
 
 func (m *RepoStore) UpdateSize(_ context.Context, id int64, sizeInKiB, sizeLFSInKiB int64) error {
 	return m.Called(id, sizeInKiB, sizeLFSInKiB).Error(0)
+}
+
+func (m *RepoStore) UpdateLastGITPush(_ context.Context, repoID int64, pushedAt int64) error {
+	return m.Called(repoID, pushedAt).Error(0)
 }
 
 func (m *RepoStore) GetSize(_ context.Context, id int64) (int64, error) {
@@ -161,6 +166,14 @@ func (m *RepoStore) ListAll(_ context.Context, filter *types.RepoFilter) ([]*typ
 func (m *RepoStore) ListSizeInfos(_ context.Context) ([]*types.RepositorySizeInfo, error) {
 	args := m.Called()
 	v, _ := args.Get(0).([]*types.RepositorySizeInfo)
+	return v, args.Error(1)
+}
+
+func (m *RepoStore) ListAllSizeInfosIter(
+	_ context.Context,
+) (iter.Seq2[*types.RepositorySizeInfo, error], error) {
+	args := m.Called()
+	v, _ := args.Get(0).(iter.Seq2[*types.RepositorySizeInfo, error])
 	return v, args.Error(1)
 }
 

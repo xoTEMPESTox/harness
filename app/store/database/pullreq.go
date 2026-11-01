@@ -38,6 +38,11 @@ import (
 
 var _ store.PullReqStore = (*PullReqStore)(nil)
 
+const (
+	recentAuthorScanMultiplier = 5
+	maxRecentAuthorScanSize    = 500
+)
+
 // NewPullReqStore returns a new PullReqStore.
 func NewPullReqStore(db *sqlx.DB,
 	pCache store.PrincipalInfoCache) *PullReqStore {
@@ -157,10 +162,13 @@ const (
 	FROM pullreqs`
 )
 
-// Find finds the pull request by id.
-func (s *PullReqStore) Find(ctx context.Context, id int64) (*types.PullReq, error) {
-	const sqlQuery = pullReqSelectBase + `
+func (s *PullReqStore) findInternal(ctx context.Context, id int64, lock bool) (*types.PullReq, error) {
+	sqlQuery := pullReqSelectBase + `
 	WHERE pullreq_id = $1`
+
+	if lock && !strings.HasPrefix(s.db.DriverName(), "sqlite") {
+		sqlQuery += "\n" + database.SQLForUpdate
+	}
 
 	db := dbtx.GetAccessor(ctx, s.db)
 
@@ -170,6 +178,16 @@ func (s *PullReqStore) Find(ctx context.Context, id int64) (*types.PullReq, erro
 	}
 
 	return s.mapPullReq(ctx, dst), nil
+}
+
+// Find finds the pull request by id.
+func (s *PullReqStore) Find(ctx context.Context, id int64) (*types.PullReq, error) {
+	return s.findInternal(ctx, id, false)
+}
+
+// FindWithLock finds the pull request by id and locks the row for the duration of the transaction.
+func (s *PullReqStore) FindWithLock(ctx context.Context, id int64) (*types.PullReq, error) {
+	return s.findInternal(ctx, id, true)
 }
 
 func (s *PullReqStore) findByNumberInternal(
@@ -634,6 +652,62 @@ func (s *PullReqStore) List(ctx context.Context, opts *types.PullReqFilter) ([]*
 	}
 
 	return result, nil
+}
+
+// ListRecentAuthorIDs returns distinct user authors for the pull request author filter.
+// Results stay in first-seen order from a pullreq_number DESC scan of at most min(limit*5, 500) rows.
+func (s *PullReqStore) ListRecentAuthorIDs(
+	ctx context.Context,
+	repoID int64,
+	limit int,
+) ([]int64, error) {
+	normalizedLimit := int(database.Limit(limit))
+	if normalizedLimit <= 0 || normalizedLimit > maxRecentAuthorScanSize {
+		normalizedLimit = maxRecentAuthorScanSize
+	}
+	stmt := database.Builder.
+		Select("pullreq_created_by").
+		From("pullreqs").
+		Join("principals ON principal_id = pullreq_created_by").
+		Where("pullreq_target_repo_id = ?", repoID).
+		Where("principal_type = ?", enum.PrincipalTypeUser).
+		OrderBy("pullreq_number DESC").
+		Limit(recentAuthorScanLimit(normalizedLimit))
+
+	sqlQuery, args, err := stmt.ToSql()
+	if err != nil {
+		return nil, fmt.Errorf("failed to build recent pull request author query: %w", err)
+	}
+
+	var scannedIDs []int64
+	db := dbtx.GetAccessor(ctx, s.db)
+	if err := db.SelectContext(ctx, &scannedIDs, sqlQuery, args...); err != nil {
+		return nil, database.ProcessSQLErrorf(ctx, err, "Failed to list recent pull request authors")
+	}
+
+	authorIDs := make([]int64, 0, min(len(scannedIDs), normalizedLimit))
+	seen := make(map[int64]struct{}, len(scannedIDs))
+	for _, id := range scannedIDs {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		authorIDs = append(authorIDs, id)
+		if len(authorIDs) == normalizedLimit {
+			break
+		}
+	}
+
+	return authorIDs, nil
+}
+
+func recentAuthorScanLimit(limit int) uint64 {
+	normalizedLimit := database.Limit(limit)
+	scanLimit := normalizedLimit * recentAuthorScanMultiplier
+	if scanLimit > maxRecentAuthorScanSize {
+		return maxRecentAuthorScanSize
+	}
+	return scanLimit
 }
 
 // Stream returns a list of pull requests for a repo.

@@ -137,6 +137,7 @@ import (
 	"github.com/harness/gitness/events"
 	"github.com/harness/gitness/git"
 	"github.com/harness/gitness/git/api"
+	"github.com/harness/gitness/git/sharedrepo"
 	"github.com/harness/gitness/git/storage"
 	"github.com/harness/gitness/infraprovider"
 	"github.com/harness/gitness/job"
@@ -300,7 +301,11 @@ func initSystem(ctx context.Context, config *types.Config) (*server.System, erro
 		return nil, err
 	}
 	storageStore := storage.ProvideLocalStore()
-	gitInterface, err := git.ProvideService(typesConfig, apiGit, clientFactory, storageStore)
+	runnerFactory, err := sharedrepo.ProvideRunnerFactory(typesConfig)
+	if err != nil {
+		return nil, err
+	}
+	gitInterface, err := git.ProvideService(typesConfig, apiGit, clientFactory, storageStore, runnerFactory)
 	if err != nil {
 		return nil, err
 	}
@@ -550,7 +555,7 @@ func initSystem(ctx context.Context, config *types.Config) (*server.System, erro
 	if err != nil {
 		return nil, err
 	}
-	pullreqService, err := pullreq.ProvideService(ctx, config, readerFactory2, readerFactory3, reporter5, transactor, authorizer, gitInterface, repoFinder, repoStore, pullReqStore, pullReqActivityStore, autoMergeStore, principalStore, pullReqReviewerStore, pullReqReviewerSuggestionStore, principalInfoCache, codeCommentView, migrator, pullReqFileViewStore, pubSub, provider, streamer)
+	pullreqService, err := pullreq.ProvideService(ctx, config, readerFactory2, readerFactory3, reporter5, transactor, authorizer, gitInterface, repoFinder, repoStore, pullReqStore, pullReqActivityStore, autoMergeStore, principalStore, pullReqReviewerStore, pullReqReviewerSuggestionStore, userGroupReviewerStore, principalInfoCache, codeCommentView, migrator, pullReqFileViewStore, pubSub, provider, streamer)
 	if err != nil {
 		return nil, err
 	}
@@ -565,7 +570,7 @@ func initSystem(ctx context.Context, config *types.Config) (*server.System, erro
 	webhookStore := database.ProvideWebhookStore(db)
 	webhookExecutionStore := database.ProvideWebhookExecutionStore(db)
 	urlProvider := webhook.ProvideURLProvider(ctx)
-	service3, err := webhook.ProvideService(ctx, webhookConfig, transactor, readerFactory2, readerFactory3, eventsReaderFactory, webhookStore, webhookExecutionStore, spaceStore, repoStore, pullReqStore, pullReqActivityStore, provider, principalStore, gitInterface, encrypter, labelStore, urlProvider, labelValueStore, auditService, streamer, secretService, spacePathStore)
+	service3, err := webhook.ProvideService(ctx, webhookConfig, transactor, readerFactory2, readerFactory3, eventsReaderFactory, readerFactory, webhookStore, webhookExecutionStore, spaceStore, repoStore, pullReqStore, pullReqActivityStore, provider, principalStore, gitInterface, encrypter, labelStore, urlProvider, labelValueStore, auditService, streamer, secretService, spacePathStore, userGroupStore)
 	if err != nil {
 		return nil, err
 	}
@@ -781,7 +786,8 @@ func initSystem(ctx context.Context, config *types.Config) (*server.System, erro
 	if err != nil {
 		return nil, err
 	}
-	sizeCalculator, err := repo2.ProvideCalculator(config, gitInterface, repoStore, spaceStore, jobScheduler, executor, lfsObjectStore, usageMetricStore)
+	listener := repo2.ProvideListener()
+	sizeCalculator, err := repo2.ProvideCalculator(config, gitInterface, repoStore, spaceStore, jobScheduler, executor, lfsObjectStore, usageMetricStore, listener, transactor)
 	if err != nil {
 		return nil, err
 	}

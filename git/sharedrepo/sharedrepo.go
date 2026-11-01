@@ -33,9 +33,9 @@ import (
 	"github.com/harness/gitness/errors"
 	"github.com/harness/gitness/git/api"
 	"github.com/harness/gitness/git/command"
+	"github.com/harness/gitness/git/directory"
 	"github.com/harness/gitness/git/parser"
 	"github.com/harness/gitness/git/sha"
-	"github.com/harness/gitness/git/tempdir"
 
 	"github.com/rs/zerolog/log"
 	"golang.org/x/exp/slices"
@@ -72,7 +72,7 @@ func NewSharedRepo(
 	_, _ = rand.Read(buf[:])
 	id := base32.StdEncoding.EncodeToString(buf[:])
 
-	repoPath, err := tempdir.CreateTemporaryPath(baseTmpDir, id)
+	repoPath, err := directory.CreateTemporaryPath(baseTmpDir, id)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create shared repository directory: %w", err)
 	}
@@ -86,7 +86,7 @@ func NewSharedRepo(
 }
 
 func (r *SharedRepo) Close(ctx context.Context) {
-	if err := tempdir.RemoveTemporaryPath(r.repoPath); err != nil {
+	if err := directory.RemoveTemporaryPath(r.repoPath); err != nil {
 		log.Ctx(ctx).Err(err).
 			Str("path", r.repoPath).
 			Msg("Failed to remove temporary shared directory")
@@ -254,7 +254,7 @@ func (r *SharedRepo) GetTreeSHA(
 		command.WithStdout(stdout),
 	)
 	if err != nil {
-		if command.AsError(err).IsAmbiguousArgErr() {
+		if cmdErr := command.AsError(err); cmdErr != nil && cmdErr.IsAmbiguousArgErr() {
 			return sha.None, errors.NotFoundf("could not resolve git revision %q", rev)
 		}
 		return sha.None, fmt.Errorf("failed to get tree sha: %w", err)
@@ -503,6 +503,10 @@ func (r *SharedRepo) ApplyToIndex(
 	cmd := command.New("apply", command.WithFlag("--cached"), command.WithArg(inputFileName))
 
 	if err := cmd.Run(ctx, command.WithDir(r.repoPath)); err != nil {
+		// Return the git stderr as a conflict (409) instead of a generic 500.
+		if cmdErr := command.AsError(err); cmdErr != nil && len(cmdErr.StdErr) > 0 {
+			return errors.Conflictf("failed to apply patch: %s", strings.TrimSpace(string(cmdErr.StdErr)))
+		}
 		return fmt.Errorf("failed to apply a patch in shared repo: %w", err)
 	}
 
@@ -924,7 +928,7 @@ func (r *SharedRepo) checkPathAvailability(
 // Nothing is done if the number of loose objects is below packObjectsThreshold.
 // The loose objects that ended up in the pack file are removed, so that the pack file is
 // all that's left for MoveObjects to install in the original repository.
-func (r *SharedRepo) PackObjects(ctx context.Context) error {
+func (r *SharedRepo) PackObjects(ctx context.Context, packObjectsThreshold int) error {
 	files, err := r.objectFiles()
 	if err != nil {
 		return err
@@ -992,28 +996,41 @@ func (r *SharedRepo) PackObjects(ctx context.Context) error {
 }
 
 // MoveObjects moves git object from the shared repository to the original repository.
-func (r *SharedRepo) MoveObjects(ctx context.Context) error {
+// It returns the paths of the moved files, relative to the objects directory and in the order in which
+// they were moved. If the move fails, no paths are returned, although some files might have been moved already.
+func (r *SharedRepo) MoveObjects(ctx context.Context) ([]string, error) {
 	if r.sourceRepoPath == "" {
-		return errors.New("shared repo not initialized with a repository")
+		return nil, errors.New("shared repo not initialized with a repository")
 	}
 
 	dstDir := path.Join(r.sourceRepoPath, "objects")
 
+	stats, err := os.Stat(dstDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check stats of destination directory in MoveObjects: %w", err)
+	}
+
+	if !stats.IsDir() {
+		return nil, errors.New("destination for MoveObjects is not a directory")
+	}
+
 	files, err := r.objectFiles()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	sort.Slice(files, func(i, j int) bool {
 		return files[i].priority < files[j].priority // 0 is top priority, 5 is lowest priority
 	})
 
+	moved := make([]string, 0, len(files))
+
 	for _, f := range files {
 		dstPath := filepath.Join(dstDir, f.relPath)
 
 		err = os.MkdirAll(filepath.Dir(dstPath), os.ModePerm)
 		if err != nil {
-			return fmt.Errorf("failed to create directory for git object: %w", err)
+			return nil, fmt.Errorf("failed to create directory for git object: %w", err)
 		}
 
 		// Try to move the file
@@ -1023,6 +1040,7 @@ func (r *SharedRepo) MoveObjects(ctx context.Context) error {
 			log.Ctx(ctx).Debug().
 				Str("object", f.relPath).
 				Msg("moved git object")
+			moved = append(moved, f.relPath)
 			continue
 		}
 
@@ -1061,16 +1079,36 @@ func (r *SharedRepo) MoveObjects(ctx context.Context) error {
 				AnErr("errRemove", errRemove).
 				Msg("failed to move or copy git object")
 
-			return fmt.Errorf("failed to move or copy git object: %w", errCopy)
+			return nil, fmt.Errorf("failed to move or copy git object: %w", errCopy)
 		}
 
 		log.Ctx(ctx).Warn().
 			Str("object", f.relPath).
 			AnErr("errRename", errRename).
 			Msg("copied git object")
+
+		moved = append(moved, f.relPath)
 	}
 
-	return nil
+	return moved, nil
+}
+
+func (r *SharedRepo) Files() ([]string, error) {
+	files, err := r.objectFiles()
+	if err != nil {
+		return nil, err
+	}
+
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].priority < files[j].priority // 0 is top priority, 5 is lowest priority
+	})
+
+	relPaths := make([]string, len(files))
+	for i := range files {
+		relPaths[i] = files[i].relPath
+	}
+
+	return relPaths, nil
 }
 
 // objectFiles returns the files of the shared repository (excluding the objects/info directory).

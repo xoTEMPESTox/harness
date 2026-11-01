@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"iter"
 	"strings"
 	"time"
 
@@ -98,6 +99,8 @@ type repository struct {
 
 	Language string `db:"repo_language"`
 
+	LOC int64 `db:"repo_loc"`
+
 	Type null.String `db:"repo_type"`
 }
 
@@ -132,6 +135,7 @@ const (
 		,repo_tags
 		,repo_type
 		,repo_language
+		,repo_loc
 		`
 )
 
@@ -316,7 +320,6 @@ func (s *RepoStore) Update(ctx context.Context, repo *types.Repository) error {
 			 repo_version = :repo_version
 			,repo_updated = :repo_updated
 			,repo_deleted = :repo_deleted
-			,repo_last_git_push = :repo_last_git_push
 			,repo_parent_id = :repo_parent_id
 			,repo_uid = :repo_uid
 			,repo_git_uid = :repo_git_uid
@@ -331,6 +334,7 @@ func (s *RepoStore) Update(ctx context.Context, repo *types.Repository) error {
 			,repo_is_empty = :repo_is_empty
 			,repo_tags = :repo_tags
 			,repo_language = :repo_language
+			,repo_loc = :repo_loc
 
 		WHERE repo_id = :repo_id AND repo_version = :repo_version - 1`
 
@@ -400,6 +404,34 @@ func (s *RepoStore) UpdateSize(ctx context.Context, id int64, sizeInKiB, lfsSize
 
 	if count == 0 {
 		return fmt.Errorf("repo %d size not updated: %w", id, gitness_store.ErrResourceNotFound)
+	}
+
+	return nil
+}
+
+// UpdateLastGITPush moves repo_last_git_push forward without bumping repo_version.
+// A missing or deleted repo is not an error: the caller retries on real failures only.
+func (s *RepoStore) UpdateLastGITPush(ctx context.Context, repoID int64, pushedAt int64) error {
+	// sqlite tests have no GREATEST; MAX is the two-arg equivalent.
+	pushExpr := "MAX(repo_last_git_push, ?)"
+	if s.db.DriverName() == PostgresDriverName {
+		pushExpr = "GREATEST(repo_last_git_push, ?)"
+	}
+
+	stmt := database.Builder.
+		Update("repositories").
+		Set("repo_last_git_push", squirrel.Expr(pushExpr, pushedAt)).
+		Where("repo_id = ? AND repo_deleted IS NULL", repoID)
+
+	sqlQuery, args, err := stmt.ToSql()
+	if err != nil {
+		return errors.Wrap(err, "Failed to create sql query")
+	}
+
+	db := dbtx.GetAccessor(ctx, s.db)
+
+	if _, err = db.ExecContext(ctx, sqlQuery, args...); err != nil {
+		return database.ProcessSQLErrorf(ctx, err, "Failed to update last git push time")
 	}
 
 	return nil
@@ -801,6 +833,91 @@ func (s *RepoStore) ListSizeInfos(ctx context.Context) ([]*types.RepositorySizeI
 	return s.mapToRepoSizes(dst), nil
 }
 
+// allSizeInfosPageSize bounds the memory one page holds while keeping round trips low.
+const allSizeInfosPageSize = 1000
+
+// ListAllSizeInfosIter iterates size info for every non-deleted repository, unlike ListSizeInfos
+// which filters to repos pushed to since their size was last updated. Pages are read as the
+// sequence is consumed, so the caller never holds every repository in memory. The first page is
+// read eagerly, so a query that cannot start fails here; the sequence then yields a non-nil error
+// at most once and stops.
+//
+// Each page's cursor is closed before any of it is yielded, deliberately: the caller writes while
+// consuming the sequence, and on SQLite an open read blocks a write on another pooled connection,
+// so a cursor held across yields deadlocks the caller against itself.
+func (s *RepoStore) ListAllSizeInfosIter(
+	ctx context.Context,
+) (iter.Seq2[*types.RepositorySizeInfo, error], error) {
+	first, err := s.listAllSizeInfosPage(ctx, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	return func(yield func(*types.RepositorySizeInfo, error) bool) {
+		page := first
+		for {
+			for _, info := range page {
+				if !yield(info, nil) {
+					return
+				}
+			}
+
+			// A short page is the last one: no repo can have an ID beyond it.
+			if len(page) < allSizeInfosPageSize {
+				return
+			}
+
+			// Stop on a cancelled context (job timeout or shutdown) rather than reading on.
+			if ctx.Err() != nil {
+				yield(nil, ctx.Err())
+				return
+			}
+
+			next, err := s.listAllSizeInfosPage(ctx, page[len(page)-1].ID)
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			page = next
+		}
+	}, nil
+}
+
+// listAllSizeInfosPage reads up to allSizeInfosPageSize rows with an ID greater than afterID.
+// Keying on the primary key rather than OFFSET keeps each page one index range scan, and repos
+// created or deleted mid-iteration shift no other repo between pages.
+func (s *RepoStore) listAllSizeInfosPage(
+	ctx context.Context,
+	afterID int64,
+) ([]*types.RepositorySizeInfo, error) {
+	stmt := database.Builder.
+		Select("repo_id", "repo_git_uid", "repo_size", "repo_lfs_size", "repo_size_updated").
+		From("repositories").
+		Where("repo_deleted IS NULL").
+		Where("repo_state NOT IN (?, ?, ?)",
+			enum.RepoStateGitImport,
+			enum.RepoStateMigrateGitPush,
+			enum.RepoStateImportFailed,
+		).
+		Where("repo_id > ?", afterID).
+		OrderBy("repo_id").
+		Limit(allSizeInfosPageSize)
+
+	sql, args, err := stmt.ToSql()
+	if err != nil {
+		return nil, errors.Wrap(err, "Failed to convert query to sql")
+	}
+
+	db := dbtx.GetAccessor(ctx, s.db)
+
+	dst := []*repoSize{}
+	if err := db.SelectContext(ctx, &dst, sql, args...); err != nil {
+		return nil, database.ProcessSQLErrorf(ctx, err, "Failed executing custom list query")
+	}
+
+	return s.mapToRepoSizes(dst), nil
+}
+
 // ListAll returns a list of all repos across spaces with the provided filters.
 func (s *RepoStore) ListAll(
 	ctx context.Context,
@@ -1090,6 +1207,7 @@ func (s *RepoStore) mapToRepo(
 		Tags:                in.Tags,
 		Type:                t,
 		Language:            in.Language,
+		LOC:                 in.LOC,
 		// Path: is set below
 	}
 
@@ -1139,6 +1257,7 @@ func (s *RepoStore) mapToRepoSize(
 		ID:          in.ID,
 		GitUID:      in.GitUID,
 		Size:        in.Size,
+		LFSSize:     in.LFSSize,
 		SizeUpdated: in.SizeUpdated,
 	}
 }
@@ -1183,6 +1302,7 @@ func mapToInternalRepo(in *types.Repository) *repository {
 		Tags:                in.Tags,
 		Type:                null.NewString(string(in.Type), in.Type != ""),
 		Language:            in.Language,
+		LOC:                 in.LOC,
 	}
 }
 

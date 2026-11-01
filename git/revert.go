@@ -72,10 +72,22 @@ type RevertOutput struct {
 // Revert creates a revert commit. The revert commit contains all changes introduced
 // by the commits between params.FromCommitSHA and params.ToCommitSHA.
 // The newly created commit will have the parent set as params.ParentCommitSHA.
+//
 // This method can be used to revert a pull request:
-// * params.ParentCommit = pr.MergeSHA
-// * params.FromCommitSHA = pr.MergeBaseSHA
-// * params.ToCommitSHA = pr.SourceSHA.
+// * params.ParentCommitSHA = pr.MergeSHA
+// * params.FromCommitSHA = pr.MergeTargetSHA
+// * params.ToCommitSHA = pr.MergeSHA.
+//
+// The revert diff must be taken against the merge commit's own target: the tip of the
+// target branch that the merge was based on. That's the first parent of the merge commit
+// for the merge and the squash method, and an ancestor of it for the rebase and the
+// fast-forward method. It must not be taken against pr.MergeBaseSHA.
+//
+// A merge-base-relative patch carries context lines from the source branch
+// and is applied to the merged tree, so it fails with "patch does not apply"
+// whenever the target branch changed the same regions. Diffing the merge commit
+// against its own target instead produces a patch that is applied to the very tree
+// that it was generated from, which always applies cleanly.
 func (s *Service) Revert(ctx context.Context, params *RevertParams) (RevertOutput, error) {
 	err := params.Validate()
 	if err != nil {
@@ -138,14 +150,16 @@ func (s *Service) Revert(ctx context.Context, params *RevertParams) (RevertOutpu
 		return RevertOutput{}, fmt.Errorf("failed to generate revert branch ref name: %w", err)
 	}
 
-	refUpdater, err := hook.CreateRefUpdater(s.hookClientFactory, params.EnvVars, repoPath)
+	refUpdater, err := hook.CreateRefUpdater(repoPath, hook.WithHooks(s.hookClientFactory, params.EnvVars))
 	if err != nil {
 		return RevertOutput{}, fmt.Errorf("failed to create reference updater: %w", err)
 	}
 
 	// Temp file to hold the diff patch.
 
-	diffPatch, err := os.CreateTemp(s.sharedRepoRoot, "revert-*.patch")
+	sharedRunner := s.sharedRunnerFactory.Runner(params.RepoUID, repoPath)
+
+	diffPatch, err := os.CreateTemp(s.sharedRunnerFactory.Directory(), "revert-*.patch")
 	if err != nil {
 		return RevertOutput{}, fmt.Errorf("failed to create temporary file to hold the diff patch: %w", err)
 	}
@@ -162,7 +176,7 @@ func (s *Service) Revert(ctx context.Context, params *RevertParams) (RevertOutpu
 
 	var commitSHA sha.SHA
 
-	err = sharedrepo.Run(ctx, refUpdater, s.sharedRepoRoot, repoPath, func(s *sharedrepo.SharedRepo) error {
+	err = sharedRunner.Run(ctx, refUpdater, func(s *sharedrepo.SharedRepo) error {
 		if err := s.WriteDiff(ctx, params.ToCommitSHA.String(), params.FromCommitSHA.String(), diffPatch); err != nil {
 			return fmt.Errorf("failed to find diff between the two commits: %w", err)
 		}

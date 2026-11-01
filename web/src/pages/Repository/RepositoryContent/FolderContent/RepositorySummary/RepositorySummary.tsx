@@ -14,18 +14,26 @@
  * limitations under the License.
  */
 
-import React from 'react'
+import React, { useMemo } from 'react'
 import { Button, ButtonVariation, Container, Layout, Text, Utils } from '@harnessio/uicore'
 import { Color, FontVariation } from '@harnessio/design-system'
-import { GitCommit, GitFork, Label, GitPullRequest } from 'iconoir-react'
+import { GitCommit, GitFork, Label, GitPullRequest, Code, HardDrive } from 'iconoir-react'
 import { useHistory } from 'react-router-dom'
+import { useGet } from 'restful-react'
 import { useAppContext } from 'AppContext'
 import { useStrings } from 'framework/strings'
 import { CodeIcon, RepositorySummaryData } from 'utils/GitUtils'
 import type { RepoRepositoryOutput } from 'services/code'
-import { permissionProps, formatDate } from 'utils/Utils'
+import { permissionProps, formatDate, formatBytes } from 'utils/Utils'
 import { useGetRepositoryMetadata } from 'hooks/useGetRepositoryMetadata'
+import LanguageBar, { LanguageStat } from './LanguageBar'
 import css from './RepositorySummary.module.scss'
+
+interface RepoLangStat {
+  Language: string
+  Bytes: number
+  Files: number
+}
 
 interface RepositorySummaryProps {
   metadata: RepoRepositoryOutput
@@ -52,6 +60,25 @@ const RepositorySummary = (props: RepositorySummaryProps) => {
   const { getString } = useStrings()
   const { standalone, hooks, routes } = useAppContext()
   const { space } = useGetRepositoryMetadata()
+
+  const { data: languageData } = useGet<RepoLangStat[]>({
+    path: `/api/v1/repos/${metadata?.path}/+/languages`,
+    lazy: !metadata?.path
+  })
+
+  const languages = useMemo<LanguageStat[]>(() => {
+    if (!languageData?.length) {
+      return []
+    }
+    const total = languageData.reduce((sum, lang) => sum + (lang.Bytes || 0), 0)
+    if (total <= 0) {
+      return []
+    }
+    return languageData.map(lang => ({
+      name: lang.Language,
+      percentage: (lang.Bytes / total) * 100
+    }))
+  }, [languageData])
 
   const MetaData: React.FC<MetaDataProps> = ({ type, text, data }) => {
     let DataIcon
@@ -161,7 +188,30 @@ const RepositorySummary = (props: RepositorySummaryProps) => {
             text={'Open Pull Requests'}
             data={repoSummaryData?.pull_req_summary.open_count}
           />
+          {typeof repoSummaryData?.loc === 'number' && repoSummaryData.loc > 0 && (
+            <Layout.Horizontal className={css.metaData}>
+              <Text color={Color.BLACK} font={{ variation: FontVariation.BODY2_SEMI }} className={css.align}>
+                <Code height={20} width={20} color={Utils.getRealCSSColor(Color.GREY_500)} />
+                {getString('linesOfCode')}
+              </Text>
+              <Text color={Color.BLACK} font={{ variation: FontVariation.BODY2_SEMI }}>
+                {repoSummaryData.loc.toLocaleString()}
+              </Text>
+            </Layout.Horizontal>
+          )}
+          {typeof repoSummaryData?.size === 'number' && repoSummaryData.size > 0 && (
+            <Layout.Horizontal className={css.metaData}>
+              <Text color={Color.BLACK} font={{ variation: FontVariation.BODY2_SEMI }} className={css.align}>
+                <HardDrive height={20} width={20} color={Utils.getRealCSSColor(Color.GREY_500)} />
+                {getString('repositorySize')}
+              </Text>
+              <Text color={Color.BLACK} font={{ variation: FontVariation.BODY2_SEMI }}>
+                {formatBytes(repoSummaryData.size * 1024)}
+              </Text>
+            </Layout.Horizontal>
+          )}
         </Layout.Vertical>
+        {languages.length > 0 && <LanguageBar languages={languages} />}
       </Layout.Vertical>
     </Container>
   )

@@ -495,6 +495,9 @@ webhookPRCommentUpdated: PR comment updated
 webhookPRMerged: PR merged
 webhookPRLabelAssigned: PR label assigned
 webhookPRReviewSubmitted: PR review submitted
+webhookPRReviewerAssigned: PR reviewer assigned
+webhookPRReviewerUnassigned: PR reviewer unassigned
+webhookPRCheckCompleted: PR check completed
 nameYourWebhook: Name your webhook
 noExecutionsFound: No Executions found
 noExecutionsFoundForWebhook: No executions found for the given webhook
@@ -1187,6 +1190,10 @@ customMin: '{{minutes}}m'
 customSecond: '{{seconds}}s'
 reqChanges: 'Request changes'
 summary: Summary
+linesOfCode: Lines of code
+repositorySize: Repository size
+languages: Languages
+other: Other
 prGenSummary: AIDA generate PR summary, insert at the cursor or replace selected text only.
 aidaGenSummary: 'AIDA is generating a summary...'
 generateSummary: Generate PR Summary

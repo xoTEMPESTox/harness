@@ -30,6 +30,7 @@ import (
 	"github.com/harness/gitness/errors"
 	"github.com/harness/gitness/git/api"
 	"github.com/harness/gitness/git/check"
+	"github.com/harness/gitness/git/directory"
 	"github.com/harness/gitness/git/hash"
 	"github.com/harness/gitness/git/hook"
 	"github.com/harness/gitness/git/sha"
@@ -52,8 +53,6 @@ const (
 	gitReferenceNamePrefixTag    = "refs/tags/"
 
 	gitHooksDir = "hooks"
-
-	fileMode700 = 0o700
 )
 
 var (
@@ -111,6 +110,8 @@ type GetRepoLanguageStatsParams struct {
 
 type GetRepoLanguageStatsOutput struct {
 	Stats map[string]*langstats.LangStat
+	// LOC is the repository's source-lines-of-code total (scc Code).
+	LOC int64
 }
 
 type GetRepositorySizeOutput struct {
@@ -244,7 +245,7 @@ func (s *Service) DeleteRepositoryBestEffort(ctx context.Context, repoUID string
 
 	// delete should not fail if repoGraveyard dir does not exist.
 	if _, err := os.Stat(s.reposGraveyard); errors.Is(err, fs.ErrNotExist) {
-		if errdir := os.MkdirAll(s.reposGraveyard, fileMode700); errdir != nil {
+		if errdir := os.MkdirAll(s.reposGraveyard, directory.FileMode700); errdir != nil {
 			return fmt.Errorf("clean up dir '%s' doesn't exist and can't be created: %w", s.reposGraveyard, errdir)
 		}
 	}
@@ -408,7 +409,6 @@ func (s *Service) HashRepository(ctx context.Context, params *HashRepositoryPara
 	}, nil
 }
 
-//nolint:gocognit // refactor if needed
 func (s *Service) createRepositoryInternal(
 	ctx context.Context,
 	base *WriteParams,
@@ -452,62 +452,18 @@ func (s *Service) createRepositoryInternal(
 	}
 
 	// only execute file creation logic if files are provided
-	//nolint: nestif
-
-	// we need temp dir for cloning
-	tempDir, err := os.MkdirTemp("", "*-"+base.RepoUID)
-	if err != nil {
-		return fmt.Errorf("error creating temp dir for repo %s: %w", base.RepoUID, err)
-	}
-	defer func(path string) {
-		// when repo is successfully created remove temp dir
-		errRm := os.RemoveAll(path)
-		if errRm != nil {
-			log.Err(errRm).Msg("failed to cleanup temporary dir.")
-		}
-	}(tempDir)
-
-	// Clone repository to temp dir
-	if err = s.git.Clone(ctx, repoPath, tempDir, api.CloneRepoOptions{}); err != nil {
-		return fmt.Errorf("createRepositoryInternal: failed to clone repo: %w", err)
-	}
-
-	// logic for receiving files
-	filePaths := make([]string, 0, 16)
-	for _, file := range files {
-		var filePath string
-		filePath, err = s.handleFileUploadIfAvailable(ctx, tempDir, file)
-		if errors.Is(err, io.EOF) {
-			log.Info().Msg("received stream EOF")
-			break
-		}
-		if err != nil {
-			return errors.Internalf(err, "failed to receive file %s", file)
-		}
-
-		filePaths = append(filePaths, filePath)
-	}
-
-	if len(filePaths) > 0 {
+	if len(files) > 0 {
 		if committer == nil {
 			committer = &base.Actor
 		}
 		if author == nil {
 			author = committer
 		}
-		// NOTE: This creates the branch in origin repo (as it doesn't exist as of now)
-		// TODO: this should at least be a constant and not hardcoded?
-		if err = s.addFilesAndPush(ctx,
-			tempDir,
-			filePaths, "HEAD:"+defaultBranch,
-			nil,
-			author,
-			authorDate,
-			committer,
-			committerDate,
-			"origin",
-			"initial commit",
-		); err != nil {
+
+		// NOTE: This creates the default branch in the repo (as it doesn't exist as of now)
+		err = s.CreateInitialCommit(ctx, base.RepoUID, repoPath, defaultBranch, files,
+			author, authorDate, committer, committerDate)
+		if err != nil {
 			return err
 		}
 	}
@@ -524,6 +480,76 @@ func (s *Service) createRepositoryInternal(
 	}
 
 	log.Info().Msgf("repository created. Path: %s", repoPath)
+	return nil
+}
+
+// CreateInitialCommit creates a commit with the provided files and points the default branch to it.
+// The repository must not have any commits yet.
+func (s *Service) CreateInitialCommit(
+	ctx context.Context,
+	repoUID string,
+	repoPath string,
+	defaultBranch string,
+	files []File,
+	author *Identity,
+	authorDate time.Time,
+	committer *Identity,
+	committerDate time.Time,
+) error {
+	// IMPORTANT: The server hooks must not be called, because the repository is still being created.
+	refUpdater, err := hook.CreateRefUpdater(repoPath)
+	if err != nil {
+		return fmt.Errorf("failed to create ref updater: %w", err)
+	}
+
+	sharedRunner := s.sharedRunnerFactory.Runner(repoUID, repoPath)
+
+	err = sharedRunner.Run(ctx, refUpdater, func(r *sharedrepo.SharedRepo) error {
+		for _, file := range files {
+			filePath := api.CleanUploadFileName(file.Path)
+			if filePath == "" {
+				return errors.InvalidArgumentf("invalid file path %q", file.Path)
+			}
+
+			if _, err := r.CreateFile(ctx, sha.None, filePath, filePermissionDefault, file.Content); err != nil {
+				return errors.Internalf(err, "failed to create file %q", file.Path)
+			}
+		}
+
+		treeSHA, err := r.WriteTree(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to write tree object: %w", err)
+		}
+
+		authorSig := &api.Signature{
+			Identity: api.Identity{Name: author.Name, Email: author.Email},
+			When:     authorDate,
+		}
+		committerSig := &api.Signature{
+			Identity: api.Identity{Name: committer.Name, Email: committer.Email},
+			When:     committerDate,
+		}
+
+		commitSHA, err := r.CommitTree(ctx, authorSig, committerSig, treeSHA, "initial commit", false)
+		if err != nil {
+			return fmt.Errorf("failed to commit the tree: %w", err)
+		}
+
+		ref := hook.ReferenceUpdate{
+			Ref: api.GetReferenceFromBranchName(defaultBranch),
+			Old: sha.Nil,
+			New: commitSHA,
+		}
+		if err := refUpdater.Init(ctx, []hook.ReferenceUpdate{ref}); err != nil {
+			return fmt.Errorf("failed to init ref updater new=%s: %w", commitSHA, err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create initial commit in shared repository: %w", err)
+	}
+
 	return nil
 }
 
@@ -633,8 +659,12 @@ func (s *Service) FetchObjects(
 	repoPath := getFullPathForRepo(s.reposRoot, params.RepoUID)
 	source := s.convertRepoSource(params.Source)
 
+	sharedRunner := s.sharedRunnerFactory.Runner(params.RepoUID, repoPath)
+
 	// sync repo content
-	err := s.git.FetchObjects(ctx, repoPath, source, params.ObjectSHAs)
+	err := sharedRunner.Run(ctx, nil, func(r *sharedrepo.SharedRepo) error {
+		return r.FetchObjects(ctx, source, params.ObjectSHAs)
+	})
 	if err != nil {
 		return FetchObjectsOutput{}, fmt.Errorf("failed to fetch git objects from source repo: %w", err)
 	}
@@ -735,7 +765,7 @@ func (s *Service) SyncRefs(
 		return nil, errors.InvalidArgumentf("Could not find remote references: %v", notFound)
 	}
 
-	refUpdater, err := hook.CreateRefUpdater(s.hookClientFactory, params.EnvVars, repoPath)
+	refUpdater, err := hook.CreateRefUpdater(repoPath, hook.WithHooks(s.hookClientFactory, params.EnvVars))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create reference updater: %w", err)
 	}
@@ -764,7 +794,9 @@ func (s *Service) SyncRefs(
 		return &SyncRefsOutput{}, nil
 	}
 
-	err = sharedrepo.Run(ctx, refUpdater, s.sharedRepoRoot, repoPath, func(s *sharedrepo.SharedRepo) error {
+	sharedRunner := s.sharedRunnerFactory.Runner(params.RepoUID, repoPath)
+
+	err = sharedRunner.Run(ctx, refUpdater, func(s *sharedrepo.SharedRepo) error {
 		objects := slices.Collect(maps.Values(refRemoteMap))
 
 		if err := s.FetchObjects(ctx, source, objects); err != nil {
@@ -805,9 +837,68 @@ func (s *Service) GetRepoLanguageStats(
 			fmt.Errorf("failed to list tree nodes recursively: %w", err)
 	}
 
-	stats := langstats.AnalyzeRepoLanguages(ctx, nodes)
+	analyzer := langstats.NewAnalyzer()
+
+	// Stream blob content through a single cat-file --batch process.
+	writer, reader, cancel := api.CatFileBatch(ctx, repoPath, nil)
+	defer cancel()
+
+	for i := range nodes {
+		n := &nodes[i]
+		// Only regular file blobs.
+		if n.IsDir() || n.IsSubmodule() || n.IsLink() || n.NodeType != api.TreeNodeTypeBlob {
+			continue
+		}
+
+		if _, err := writer.Write([]byte(n.SHA.String() + "\n")); err != nil {
+			return GetRepoLanguageStatsOutput{},
+				fmt.Errorf("failed to request blob content from cat-file batch: %w", err)
+		}
+
+		header, err := api.ReadBatchHeaderLine(reader)
+		if err != nil {
+			// A missing object leaves the stream aligned (git emits no body), so we
+			// can skip it and keep going. Any other error means the stream itself is
+			// broken and continuing would read garbage, so abort.
+			if errors.IsNotFound(err) {
+				log.Ctx(ctx).Warn().Err(err).Str("path", n.Path).
+					Msg("skipping blob missing from object database during language analysis")
+				continue
+			}
+			return GetRepoLanguageStatsOutput{},
+				fmt.Errorf("failed to read cat-file batch header: %w", err)
+		}
+
+		// Bound the reader to the blob so the analyzer streams large files rather
+		// than buffering them; it reads only what it needs to count lines.
+		blob := io.LimitReader(reader, header.Size)
+		if err := analyzer.AddBlob(n.Path, n.Size, blob); err != nil {
+			return GetRepoLanguageStatsOutput{},
+				fmt.Errorf("failed to analyze blob content: %w", err)
+		}
+
+		// Drain anything AddBlob left unread so the batch stream stays aligned.
+		if _, err := io.Copy(io.Discard, blob); err != nil {
+			return GetRepoLanguageStatsOutput{},
+				fmt.Errorf("failed to drain blob from cat-file batch: %w", err)
+		}
+
+		// cat-file --batch emits a trailing newline after the object content.
+		if _, err := reader.Discard(1); err != nil {
+			return GetRepoLanguageStatsOutput{},
+				fmt.Errorf("failed to discard cat-file batch EOL: %w", err)
+		}
+	}
+
+	if err := writer.Close(); err != nil {
+		return GetRepoLanguageStatsOutput{},
+			fmt.Errorf("failed to close cat-file batch writer: %w", err)
+	}
+
+	analyzer.LogUnclassified(ctx)
 
 	return GetRepoLanguageStatsOutput{
-		Stats: stats,
+		Stats: analyzer.Stats(),
+		LOC:   analyzer.CodeLines(),
 	}, nil
 }

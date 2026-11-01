@@ -24,6 +24,7 @@ import (
 	"github.com/harness/gitness/events"
 	"github.com/harness/gitness/git"
 	"github.com/harness/gitness/job"
+	"github.com/harness/gitness/store/database/dbtx"
 	"github.com/harness/gitness/types"
 
 	"github.com/google/wire"
@@ -32,7 +33,14 @@ import (
 var WireSet = wire.NewSet(
 	ProvideCalculator,
 	ProvideService,
+	ProvideListener,
 )
+
+// ProvideListener wires a no-op listener for the OSS binary, which has nothing to notify.
+// harness-code's wire graph supplies a real one instead.
+func ProvideListener() Listener {
+	return noopListener{}
+}
 
 func ProvideCalculator(
 	config *types.Config,
@@ -43,6 +51,8 @@ func ProvideCalculator(
 	executor *job.Executor,
 	lfsStore store.LFSObjectStore,
 	usageMetricStore store.UsageMetricStore,
+	listener Listener,
+	tx dbtx.Transactor,
 ) (*SizeCalculator, error) {
 	job := &SizeCalculator{
 		enabled:          config.RepoSize.Enabled,
@@ -54,7 +64,9 @@ func ProvideCalculator(
 		spaceStore:       spaceStore,
 		scheduler:        scheduler,
 		lfsStore:         lfsStore,
+		tx:               tx,
 		usageMetricStore: usageMetricStore,
+		listener:         listener,
 	}
 
 	err := executor.Register(jobType, job)
